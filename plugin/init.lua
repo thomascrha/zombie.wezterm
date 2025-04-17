@@ -2,17 +2,20 @@ local wezterm = require("wezterm") --[[@as Wezterm]] --- this type cast invokes 
 
 local M = {}
 
+-- Constants
+local STATE_DIR = os.getenv("HOME") .. "/.local/state/wezterm/zombie"
+local VERSION = 1
 -- ~/.local/state/wezterm/zombie/[WORKSPACE_NAME].json
 
-M.save_current_workspace = function()
-  local active_workspace = wezterm.mux.get_active_workspace()
 
-  if not active_workspace then
-    wezterm.log_error("No active workspace found")
+local path_exists = function(path)
+  local f = io.open(path, "r")
+  if f then
+    f:close()
+    return true
+  else
     return false
   end
-
-  return M.save_workspace(active_workspace)
 end
 
 M.save_workspace = function(workspace_name)
@@ -21,13 +24,13 @@ M.save_workspace = function(workspace_name)
     return false
   end
 
-  local home = os.getenv("HOME")
-  local state_dir = home .. "/.local/state/wezterm/zombie"
-  local state_file = state_dir .. "/" .. workspace_name .. ".json"
-  os.execute("mkdir -p '" .. state_dir .. "'")
+  local state_file = STATE_DIR .. "/" .. workspace_name .. ".json"
+  if not path_exists(state_file) then
+    os.execute("mkdir -p '" .. STATE_DIR .. "'")
+  end
 
   local workspace_state = {
-    version = 1,
+    version = VERSION,
     name = workspace_name,
     tabs = {}
   }
@@ -78,16 +81,97 @@ M.save_workspace = function(workspace_name)
   end
 end
 
--- Save all workspaces
+M.restore_workspace = function (workspace_name)
+  if not workspace_name then
+    wezterm.log_error("No workspace name provided to restore_workspace")
+    return false
+  end
+
+  local state_file = STATE_DIR .. "/" .. workspace_name .. ".json"
+  if not path_exists(state_file) then
+    wezterm.log_error("State file does not exist: " .. state_file)
+    return false
+  end
+
+  local file = io.open(state_file, "r")
+  if not file then
+    wezterm.log_error("Failed to open file for reading: " .. state_file)
+    return false
+  end
+
+  local content = file:read("*a")
+  file:close()
+
+  local workspace_state = wezterm.json_decode(content)
+
+  if not workspace_state or workspace_state.version ~= VERSION then
+    assert(workspace_state.version == VERSION, "Unsupported workspace state version: " .. workspace_state.version)
+  end
+
+  wezterm.mux.set_active_workspace(workspace_name)
+
+  for _, tab_info in ipairs(workspace_state.tabs) do
+    local tab = wezterm.mux.spawn_window({
+      cwd = tab_info.panes[1].cwd,
+      args = tab_info.panes[1].command and tab_info.panes[1].command.args or nil,
+      name = tab_info.id,
+      initial_rows = wezterm.gui.get_config().initial_rows,
+      initial_cols = wezterm.gui.get_config().initial_cols,
+    })
+
+    for _, pane_info in ipairs(tab_info.panes) do
+      tab:split_pane({
+        direction = "Right",
+        size = "50%",
+        cwd = pane_info.cwd,
+        args = pane_info.command and pane_info.command.args or nil,
+      })
+    end
+  end
+
+  return true
+end
+
+M.save_current_workspace = function()
+  local active_workspace = wezterm.mux.get_active_workspace()
+
+  if not active_workspace then
+    wezterm.log_error("No active workspace found")
+    return false
+  end
+
+  return M.save_workspace(active_workspace)
+end
+
+M.restore_current_workspace = function()
+  local active_workspace = wezterm.mux.get_active_workspace()
+
+  if not active_workspace then
+    wezterm.log_error("No active workspace found")
+    return false
+  end
+
+  return M.restore_workspace(active_workspace)
+end
+
+M.restore_workspaces = function()
+  local workspaces = wezterm.mux.get_workspace_names()
+
+  for _, workspace_name in ipairs(workspaces) do
+    if workspace_name ~= wezterm.mux.get_active_workspace() then
+      M.restore_workspace(workspace_name)
+    end
+  end
+
+  M.restore_workspace(wezterm.mux.get_active_workspace())
+end
+
 M.save_workspaces = function()
-  -- Get the list of workspace names
   local workspaces = wezterm.mux.get_workspace_names()
   local active_workspace = wezterm.mux.get_active_workspace()
 
-  -- Save the active workspace first
   M.save_workspace(active_workspace)
 
-  -- Then save all other workspaces
   for _, workspace_name in ipairs(workspaces) do
     if workspace_name ~= active_workspace then
       M.save_workspace(workspace_name)
